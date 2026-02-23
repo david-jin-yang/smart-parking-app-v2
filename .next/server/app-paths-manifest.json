@@ -1,0 +1,13 @@
+{
+  "/page": "app/page.js",
+  "/api/demo/me/route": "app/api/demo/me/route.js",
+  "/api/lots/route": "app/api/lots/route.js",
+  "/api/sessions/route": "app/api/sessions/route.js",
+  "/session/page": "app/session/page.js",
+  "/api/sessions/[id]/route": "app/api/sessions/[id]/route.js",
+  "/api/sessions/[id]/assign/route": "app/api/sessions/[id]/assign/route.js",
+  "/api/sessions/[id]/arrive/route": "app/api/sessions/[id]/arrive/route.js",
+  "/api/sessions/[id]/park/route": "app/api/sessions/[id]/park/route.js",
+  "/api/sessions/[id]/exit/route": "app/api/sessions/[id]/exit/route.js",
+  "/receipt/page": "app/receipt/page.js"
+}
