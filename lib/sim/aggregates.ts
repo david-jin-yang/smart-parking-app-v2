@@ -1,204 +1,165 @@
 /**
  * lib/sim/aggregates.ts
  *
- * Updates the metrics_aggregate table as the simulation runs.
- * Also used by real session API routes for live data.
- *
- * Design: upsert-based — safe to call multiple times for the same key.
+ * v3: full type1/type2 split, EV charge tracking, handicap tracking.
  */
 
 import type Database from 'better-sqlite3'
 
-// ── Histogram helpers ─────────────────────────────────────────────────────────
+// ── Histogram bins ────────────────────────────────────────────────────────────
 
-// time_to_spot bins in seconds
-const TTS_BINS = [0, 30, 60, 120, 300, 600, 1800]
+const TTS_BINS    = [0, 30, 60, 120, 300, 600, 1800]
+const SEARCH_BINS = [5, 7, 9, 11, 13, 15, 17, 20]
+const DWELL_BINS  = [15, 30, 60, 90, 120, 150, 180, 240]
 
-// dwell bins in minutes
-const DWELL_BINS = [15, 30, 60, 90, 120, 150, 180, 240]
+function ttsBin(s: number)      { for (let i = TTS_BINS.length-1;    i>=0; i--) if (s >= TTS_BINS[i])    return TTS_BINS[i];    return 0  }
+function searchBin(m: number)   { for (let i = SEARCH_BINS.length-1; i>=0; i--) if (m >= SEARCH_BINS[i]) return SEARCH_BINS[i]; return 5  }
+function dwellBin(m: number)    { for (let i = DWELL_BINS.length-1;  i>=0; i--) if (m >= DWELL_BINS[i])  return DWELL_BINS[i];  return 15 }
 
-function ttsbin(seconds: number): number {
-  for (let i = TTS_BINS.length - 1; i >= 0; i--) {
-    if (seconds >= TTS_BINS[i]) return TTS_BINS[i]
-  }
-  return 0
-}
-
-function dwellBin(minutes: number): number {
-  for (let i = DWELL_BINS.length - 1; i >= 0; i--) {
-    if (minutes >= DWELL_BINS[i]) return DWELL_BINS[i]
-  }
-  return 15
-}
-
-function parseHistogram(json: string): Record<string, number> {
-  try {
-    return JSON.parse(json) as Record<string, number>
-  } catch {
-    return {}
-  }
+function parseHist(json: string): Record<string, number> {
+  try { return JSON.parse(json) as Record<string, number> } catch { return {} }
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface SessionMetrics {
-  date: string          // 'YYYY-MM-DD'
-  hour_bucket: number   // 0-23
+  date: string
+  hour_bucket: number
   lot_id: string
   age_range: string | null
   gender: string | null
-  // what happened
   parked: boolean
   conflict: boolean
   abandoned: boolean
   overstay: boolean
   time_to_spot_ms: number | null
+  non_app_search_minutes: number | null
   dwell_minutes: number | null
   surcharge: number
   revenue: number
+  is_app: boolean
+  user_type: 'type1_active' | 'type2_passive'
+  is_handicap: boolean
+  handicap_overflow: boolean   // true = HC user took standard spot
+  is_ev_driver: boolean
+  charge_purpose: boolean
+  ev_charge_turned_away: boolean
 }
 
-// ── Main upsert function ──────────────────────────────────────────────────────
+// ── Main upsert ───────────────────────────────────────────────────────────────
 
-/**
- * Atomically increments all aggregate counters for a completed session event.
- * Writes two rows per call: one for the specific cohort, one for '__all__'.
- */
-export function recordSessionMetrics(
-  db: Database.Database,
-  m: SessionMetrics
-): void {
+export function recordSessionMetrics(db: Database.Database, m: SessionMetrics): void {
   const age_range = m.age_range ?? '__all__'
-  const gender = m.gender ?? '__all__'
+  const gender    = m.gender    ?? '__all__'
 
-  // Write specific cohort row + rollup row
-  const cohortKeys = [
-    { age_range, gender },
-    { age_range: '__all__', gender: '__all__' },
-  ]
-
-  for (const key of cohortKeys) {
-    upsertAgg(db, {
-      date: m.date,
-      hour_bucket: m.hour_bucket,
-      lot_id: m.lot_id,
-      ...key,
-      parked: m.parked,
-      conflict: m.conflict,
-      abandoned: m.abandoned,
-      overstay: m.overstay,
-      time_to_spot_ms: m.time_to_spot_ms,
-      dwell_minutes: m.dwell_minutes,
-      surcharge: m.surcharge,
-      revenue: m.revenue,
-    })
+  for (const key of [{ age_range, gender }, { age_range: '__all__', gender: '__all__' }]) {
+    upsertAgg(db, { ...m, age_range: key.age_range, gender: key.gender })
   }
 }
 
-function upsertAgg(
-  db: Database.Database,
-  m: {
-    date: string
-    hour_bucket: number
-    lot_id: string
-    age_range: string
-    gender: string
-    parked: boolean
-    conflict: boolean
-    abandoned: boolean
-    overstay: boolean
-    time_to_spot_ms: number | null
-    dwell_minutes: number | null
-    surcharge: number
-    revenue: number
-  }
-): void {
-  // Ensure row exists
+function upsertAgg(db: Database.Database, m: SessionMetrics & { age_range: string; gender: string }): void {
   db.prepare(
-    `INSERT OR IGNORE INTO metrics_aggregate
-       (date, hour_bucket, lot_id, age_range, gender)
+    `INSERT OR IGNORE INTO metrics_aggregate (date, hour_bucket, lot_id, age_range, gender)
      VALUES (?, ?, ?, ?, ?)`
   ).run(m.date, m.hour_bucket, m.lot_id, m.age_range, m.gender)
 
-  // Fetch current histograms to update them
   const row = db.prepare(
-    `SELECT tts_histogram, dwell_histogram FROM metrics_aggregate
-     WHERE date = ? AND hour_bucket = ? AND lot_id = ? AND age_range = ? AND gender = ?`
+    `SELECT tts_histogram, dwell_histogram, non_app_search_histogram
+     FROM metrics_aggregate
+     WHERE date=? AND hour_bucket=? AND lot_id=? AND age_range=? AND gender=?`
   ).get(m.date, m.hour_bucket, m.lot_id, m.age_range, m.gender) as
-    { tts_histogram: string; dwell_histogram: string } | undefined
+    { tts_histogram: string; dwell_histogram: string; non_app_search_histogram: string } | undefined
 
-  const ttsHist = parseHistogram(row?.tts_histogram ?? '{}')
-  const dwellHist = parseHistogram(row?.dwell_histogram ?? '{}')
+  const ttsHist    = parseHist(row?.tts_histogram            ?? '{}')
+  const dwellHist  = parseHist(row?.dwell_histogram          ?? '{}')
+  const searchHist = parseHist(row?.non_app_search_histogram ?? '{}')
 
-  // Update histogram bins
-  if (m.time_to_spot_ms !== null) {
-    const bin = String(ttsbin(Math.round(m.time_to_spot_ms / 1000)))
+  if (m.user_type === 'type1_active' && m.time_to_spot_ms !== null) {
+    const bin = String(ttsBin(Math.round(m.time_to_spot_ms / 1000)))
     ttsHist[bin] = (ttsHist[bin] ?? 0) + 1
+  }
+  if (m.user_type === 'type2_passive' && m.non_app_search_minutes !== null) {
+    const bin = String(searchBin(Math.round(m.non_app_search_minutes)))
+    searchHist[bin] = (searchHist[bin] ?? 0) + 1
   }
   if (m.dwell_minutes !== null) {
     const bin = String(dwellBin(Math.round(m.dwell_minutes)))
     dwellHist[bin] = (dwellHist[bin] ?? 0) + 1
   }
 
-  // Atomic increment update
   db.prepare(
     `UPDATE metrics_aggregate SET
-       session_count  = session_count  + 1,
-       parked_count   = parked_count   + ?,
-       conflict_count = conflict_count + ?,
-       abandon_count  = abandon_count  + ?,
-       overstay_count = overstay_count + ?,
-       sum_time_to_spot_ms = sum_time_to_spot_ms + ?,
-       sum_dwell_minutes   = sum_dwell_minutes   + ?,
-       sum_surcharge       = sum_surcharge       + ?,
-       sum_revenue         = sum_revenue         + ?,
-       tts_histogram       = ?,
-       dwell_histogram     = ?
-     WHERE date = ? AND hour_bucket = ? AND lot_id = ? AND age_range = ? AND gender = ?`
+       session_count              = session_count + 1,
+       app_session_count          = app_session_count + ?,
+       non_app_session_count      = non_app_session_count + ?,
+       type1_count                = type1_count + ?,
+       type2_count                = type2_count + ?,
+       parked_count               = parked_count + ?,
+       conflict_count             = conflict_count + ?,
+       abandon_count              = abandon_count + ?,
+       overstay_count             = overstay_count + ?,
+       sum_time_to_spot_ms        = sum_time_to_spot_ms + ?,
+       sum_type1_tts_ms           = sum_type1_tts_ms + ?,
+       sum_type2_wait_ms          = sum_type2_wait_ms + ?,
+       sum_non_app_search_minutes = sum_non_app_search_minutes + ?,
+       sum_dwell_minutes          = sum_dwell_minutes + ?,
+       sum_surcharge              = sum_surcharge + ?,
+       sum_revenue                = sum_revenue + ?,
+       ev_charge_trips            = ev_charge_trips + ?,
+       ev_charge_turned_away      = ev_charge_turned_away + ?,
+       handicap_trips             = handicap_trips + ?,
+       handicap_overflow          = handicap_overflow + ?,
+       tts_histogram              = ?,
+       dwell_histogram            = ?,
+       non_app_search_histogram   = ?
+     WHERE date=? AND hour_bucket=? AND lot_id=? AND age_range=? AND gender=?`
   ).run(
-    m.parked ? 1 : 0,
-    m.conflict ? 1 : 0,
+    m.is_app  ? 1 : 0,
+    !m.is_app ? 1 : 0,
+    m.user_type === 'type1_active' ? 1 : 0,
+    m.user_type === 'type2_passive' ? 1 : 0,
+    m.parked    ? 1 : 0,
+    m.conflict  ? 1 : 0,
     m.abandoned ? 1 : 0,
-    m.overstay ? 1 : 0,
+    m.overstay  ? 1 : 0,
+    // sum_time_to_spot_ms (all app users)
     m.time_to_spot_ms ?? 0,
+    // sum_type1_tts_ms
+    m.user_type === 'type1_active' && m.time_to_spot_ms ? m.time_to_spot_ms : 0,
+    // sum_type2_wait_ms
+    m.user_type === 'type2_passive' && m.non_app_search_minutes
+      ? m.non_app_search_minutes * 60 * 1000 : 0,
+    // sum_non_app_search_minutes
+    m.non_app_search_minutes ?? 0,
     m.dwell_minutes ?? 0,
     m.surcharge,
     m.revenue,
+    m.charge_purpose ? 1 : 0,
+    m.ev_charge_turned_away ? 1 : 0,
+    m.is_handicap ? 1 : 0,
+    m.handicap_overflow ? 1 : 0,
     JSON.stringify(ttsHist),
     JSON.stringify(dwellHist),
-    m.date,
-    m.hour_bucket,
-    m.lot_id,
-    m.age_range,
-    m.gender,
+    JSON.stringify(searchHist),
+    m.date, m.hour_bucket, m.lot_id, m.age_range, m.gender,
   )
 }
 
-// ── p50/p90 from histogram ────────────────────────────────────────────────────
+// ── Percentile helper ─────────────────────────────────────────────────────────
 
-/**
- * Compute approximate percentile from a stored histogram.
- * Returns the bin value at or above the requested percentile.
- */
-export function percentileFromHistogram(
-  histJson: string,
-  percentile: number   // 0-100
-): number | null {
-  const hist = parseHistogram(histJson)
+export function percentileFromHistogram(histJson: string, percentile: number): number | null {
+  const hist    = parseHist(histJson)
   const entries = Object.entries(hist)
     .map(([bin, count]) => ({ bin: Number(bin), count }))
     .sort((a, b) => a.bin - b.bin)
 
-  if (entries.length === 0) return null
-
-  const total = entries.reduce((sum, e) => sum + e.count, 0)
+  if (!entries.length) return null
+  const total  = entries.reduce((s, e) => s + e.count, 0)
   const target = (percentile / 100) * total
-
-  let cumulative = 0
-  for (const entry of entries) {
-    cumulative += entry.count
-    if (cumulative >= target) return entry.bin
+  let cum = 0
+  for (const e of entries) {
+    cum += e.count
+    if (cum >= target) return e.bin
   }
-
   return entries[entries.length - 1].bin
 }

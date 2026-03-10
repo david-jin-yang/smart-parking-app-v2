@@ -11,15 +11,15 @@
       "static/css/app/layout.css",
       "static/chunks/app/layout.js"
     ],
-    "/session/page": [
+    "/admin/page": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/session/page.js"
+      "static/chunks/app/admin/page.js"
     ],
-    "/receipt/page": [
+    "/analytics/page": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",
-      "static/chunks/app/receipt/page.js"
+      "static/chunks/app/analytics/page.js"
     ]
   }
 }

@@ -1,6 +1,14 @@
-node_modules/
-.next/
-out/
-dist/
-.env*
+# dependencies
+node_modules
+
+# next build output
+.next
+out
+
+# coverage/testing
+coverage
+
+# misc
 .DS_Store
+.env
+.env.local
