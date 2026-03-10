@@ -1,13 +1,10 @@
 {
   "/page": "app/page.js",
+  "/api/demo/me/route": "app/api/demo/me/route.js",
   "/api/lots/route": "app/api/lots/route.js",
   "/admin/page": "app/admin/page.js",
   "/api/sim/status/route": "app/api/sim/status/route.js",
   "/api/sim/events/stream/route": "app/api/sim/events/stream/route.js",
   "/api/lots/[id]/route": "app/api/lots/[id]/route.js",
-  "/analytics/page": "app/analytics/page.js",
-  "/api/analytics/summary/route": "app/api/analytics/summary/route.js",
-  "/api/analytics/cohorts/route": "app/api/analytics/cohorts/route.js",
-  "/api/sim/run/route": "app/api/sim/run/route.js",
   "/api/sim/reset/route": "app/api/sim/reset/route.js"
 }
